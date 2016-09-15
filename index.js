@@ -25,6 +25,7 @@ var child_pid = 0;
 var killer;
 
 function shutdown (e) {
+    return;
     if (child_pid !== 0) {
         debug('killing mongod process: %d', child_pid);
         process.removeListener('exit', shutdown);
@@ -45,7 +46,7 @@ function start_server(opts, callback) {
     }
 
     if (opts.args.fork === undefined) {
-        opts.args.fork = true;
+        opts.args.fork = false;
     }
 
     if (!opts.args.logpath) {
@@ -71,25 +72,60 @@ function start_server(opts, callback) {
 
     function start() {
         debug("spawn", bpath + "mongod", args.join(' '));
-        var child = spawnSync(bpath + "mongod", args);
-        mongodb_logs(child.stdout.toString());
-        mongodb_logs(child.stderr.toString());
 
-        // error
-        if (child.status !== 0) {
-            if (opts.exit_callback) {
-                opts.exit_callback(child.status);
-            }
-            callback(child.status);
+        var child;
+        if (opts.args.fork) {
+            child = spawnSync(bpath + "mongod", args);
+
+            // need to catch child pid
+            var child_pid_match = stdout.toString().match(/forked process:\s+(\d+)/i);
+            child_pid = child_pid_match[1];
+
+            onSpawnComplete(child.status, child.processId, child.stdout, child,stderr);
             return child.status;
+        } else {
+            child = proc.spawn(bpath + "mongod", args, {}, function(error, stdout, stderr) {
+                var a = error;
+            });
+
+            child.stdout.on('data', function(data) {
+                console.log('stdout:  ' + data);
+                onSpawnComplete(true, child.processId, null, null);
+            });
+
+            child.on('error', function(error, stdout, stderr) {
+                var status = error ? 2 : 0;
+                console.log('stdout:  ' + error);
+                onSpawnComplete(false, child.processId, stdout, stderr);
+            });
+
+            child_pid = child.pid;
+            if (child_pid != 0) {
+                return 0;
+            } else {
+                return -1;
+            }
+        }
+    }
+
+    function onSpawnComplete(childStarted, stdout, stderr) {
+        if (stdout) {
+            mongodb_logs(stdout.toString());
+        }
+        if (stderr) {
+            mongodb_logs(stderr.toString());
         }
 
-        // need to catch child pid
-        var child_pid_match = child.stdout.toString().match(/forked process:\s+(\d+)/i);
-        child_pid = child_pid_match[1];
-
-        // if mongod started, spawn killer
-        if (child.status === 0) {
+        // error
+        if (!childStarted) {
+            if (opts.exit_callback) {
+                opts.exit_callback(childStatus);
+            }
+            if (callback) {
+                callback(childStatus);
+            }
+        } else {
+            // if mongod started, spawn killer
             debug('starting mongokiller.js, ppid:%d\tmongod pid:%d', process.pid, child_pid);
             killer = proc.spawn("node", [path.join(__dirname, "binjs", "mongokiller.js"), process.pid, child_pid], {
                 stdio: 'ignore',
@@ -97,8 +133,6 @@ function start_server(opts, callback) {
             });
             killer.unref();
         }
-
-        return child.status;
     }
 }
 
